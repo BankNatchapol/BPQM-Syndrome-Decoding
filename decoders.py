@@ -32,7 +32,34 @@ def decode_bpqm(
     only_zero_codeword: bool = True,
     debug: bool = False,
 ) -> float:
-    """Decode either a single codeword using BPQM."""
+    """Evaluate BPQM success probability for a bit or full codeword.
+
+    Parameters
+    ----------
+    code : LinearCode
+        Code to decode.
+    theta : float
+        Channel parameter.
+    cloner : Cloner
+        Cloner used for unrolled variable nodes.
+    height : int
+        Unrolling depth for the computation tree.
+    mode : {"bit", "codeword"}
+        Decode a single bit or the entire codeword.
+    bit : int, optional
+        Index of the bit to decode when ``mode='bit'``.
+    order : Sequence[int], optional
+        Order in which bits are decoded. Defaults to ``range(code.n)``.
+    only_zero_codeword : bool, optional
+        If ``True`` only the all-zero codeword is simulated.
+    debug : bool, optional
+        If ``True`` print intermediate circuit information.
+
+    Returns
+    -------
+    float
+        Average success probability over the simulated codewords.
+    """
     assert mode in ['bit','codeword'], "mode should be 'bit' or 'codeword'."
     if mode=='bit':
         assert bit!=None, "bit shouldn't be None when choosing mode'bit'."
@@ -117,26 +144,27 @@ def create_init_qc(
     codeword: Optional[Union[Sequence[int], np.ndarray]] = None,
     prior: Optional[float] = None
 ) -> QuantumCircuit:
-    """
-    Build the part of the circuit that encodes your classical bits
-    into qubit states |Q(0,θ)> / |Q(1,θ)> or a prior‐weighted superposition.
-    
+    """Create the circuit that prepares the channel input states.
+
+    If ``prior`` is ``None`` each qubit is initialized to ``|Q(x,θ)〉``
+    according to ``codeword``.  Otherwise all qubits are prepared in a
+    superposition weighted by ``prior``.
+
     Parameters
     ----------
-    n_data_qubits : int
-        How many “data” qubits at the front correspond to the codeword bits.
-    codeword : sequence of {0,1}
-        The classical bitstring to embed. Length must be n_data_qubits.
+    code : LinearCode
+        Code describing the number of data qubits.
     theta : float
-        Angle θ (in radians) for amplitude encoding.
+        Channel parameter.
+    codeword : sequence of int, optional
+        Bit string to embed when ``prior`` is ``None``.
     prior : float, optional
-        If given, all data‐qubits are initialized to prior⋅|Q(0)> + (1−prior)⋅|Q(1)>;
-        otherwise each qubit is set to |Q(x,θ)> based on the codeword bit x.
-    
+        Weight for ``|0〉`` when preparing a uniform prior state.
+
     Returns
     -------
     QuantumCircuit
-        A circuit of width n_total_qubits that prepares the data qubits.
+        Initialization circuit on ``code.n`` qubits.
     """
     qc_init = QuantumCircuit(code.n)
     
@@ -171,37 +199,33 @@ def decode_single_codeword(
     debug: bool = False,
     run_simulation: bool = True
 ) -> Tuple[Optional[np.ndarray], List[int], QuantumCircuit]:
-    """
-    Given a pre-built initialization circuit `qc_init`, append BPQM logic
-    and measurement to decode a codeword under a pure‐state CQ channel.
+    """Decode a single codeword using the BPQM circuit.
 
     Parameters
     ----------
     qc_init : QuantumCircuit
-        Initialization circuit produced by `create_init_qc(...)` of width = code.n.
+        Circuit produced by :func:`create_init_qc` that prepares the inputs.
     code : LinearCode
-        Linear‐code object with H‐matrix and graph routines.
+        Linear-code instance describing the factor graph.
     cloner : Cloner
-        Cloner instance for loopy-graph segments.
+        Cloner used to approximate variable-node copies.
     height : int
-        Unroll depth for the BPQM computation tree.
-    order : sequence of ints, optional
-        Bit decode order (default = all bits in [0..code.n-1]).
-    shots : int, default=512
-        Number of measurement shots.
-    debug : bool, default=False
-        If True, print sorted & reversed counts + syndrome.
-    run_simulation : bool, default=True
-        If False, return (None, decoded_qubits, qc_decode) without running.
+        Unrolling depth for the BPQM computation tree.
+    shots : int, optional
+        Number of measurement shots (default ``512``).
+    debug : bool, optional
+        If ``True`` print measurement counts and syndromes.
+    run_simulation : bool, optional
+        If ``False`` only the circuit is returned.
 
     Returns
     -------
     decoded_bits : np.ndarray or None
-        The decoded bits if `run_simulation=True`, otherwise None.
+        Best guess for the codeword, or ``None`` when ``run_simulation`` is ``False``.
     decoded_qubits : List[int]
-        The list of qubit indices measured in order.
+        Indices of the measured qubits in order.
     qc_decode : QuantumCircuit
-        The BPQM decoding circuit (without initialization).
+        The constructed BPQM circuit (without ``qc_init``).
     """
     order = list(range(code.n))
 
@@ -304,39 +328,35 @@ def decode_single_syndrome(
     debug: bool = False,
     run_simulation: bool = True
 ) -> Tuple[Optional[np.ndarray], list[int], QuantumCircuit]:
-    """
-    Given a pre-built `qc_init`, append BPQM logic conditioned on `syndrome`
-    to produce a decode circuit and (optionally) run it.
+    """Decode given a pre-constructed syndrome circuit.
 
     Parameters
     ----------
     qc_init : QuantumCircuit
-        Initialization circuit of width = code.n.
+        Circuit returned by :func:`create_init_qc`.
+    syndrome_qc : QuantumCircuit
+        Circuit preparing the measured syndrome ancillae.
     code : LinearCode
-        The linear code defining the syndrome checks.
+        Code describing the parity checks.
     cloner : Cloner
-        Cloner instance for loopy-graph segments.
+        Cloner used for the unrolled variable nodes.
     height : int
         Unrolling depth for the BPQM tree.
-    syndrome : Sequence[int] or np.ndarray
-        Observed syndrome vector (length = n–k).
-    order : Sequence[int], optional
-        Bit indices defining decode order (default = all bits).
-    shots : int, default=512
-        Number of measurement shots.
-    debug : bool, default=False
-        If True, print reversed-and-sorted counts with their syndrome.
-    run_simulation : bool, default=True
-        If False, returns (None, decoded_qubits, qc_decode) without running.
+    shots : int, optional
+        Number of measurement shots (default ``512``).
+    debug : bool, optional
+        If ``True`` print measurement counts and syndromes.
+    run_simulation : bool, optional
+        If ``False`` only the circuit is returned.
 
     Returns
     -------
     decoded_bits : np.ndarray or None
-        The decoded bit-string if `run_simulation=True`, otherwise None.
+        Decoded bit string, or ``None`` when ``run_simulation`` is ``False``.
     decoded_qubits : list[int]
-        The list of qubit indices that are measured (in order).
+        Indices of the measured qubits.
     qc_decode : QuantumCircuit
-        The BPQM decoding circuit (without initialization).
+        The BPQM decoding circuit without initialization.
     """
     order = list(range(code.n))
 
