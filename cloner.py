@@ -17,7 +17,7 @@ class Cloner:
     def generate_cloner_circuit(
         self, graph: nx.Graph, occurances: Dict[str, int], qubit_mapping: Dict[str, int], n_qubits: int,
     ) -> QuantumCircuit:
-        """Return the circuit preparing the initial state."""
+        """Return the circuit implementing the required cloning operations."""
         raise NotImplementedError
 
 class VarNodeCloner(Cloner):
@@ -171,7 +171,8 @@ class AsymmetricVarNodeCloner(Cloner):
 
                 graph.nodes[l]["frac"] = f
                 t = np.arccos(np.cos(self.theta)**f)
-            else: raise
+            else:
+                raise Exception("cloning a qubit to >2 output qubits not yet implemented")
             graph.nodes[l]["angle"] = [(t,{})]
 
     def cloner_unitary(self, t1: float, t2: float) -> np.ndarray:

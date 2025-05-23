@@ -20,7 +20,13 @@ Forked from [https://github.com/ChriPiv/quantum-message-passing-paper](https://g
 import numpy as np
 import networkx as nx
 from matplotlib import pyplot as plt
-from decoders import LinearCode, VarNodeCloner, decode_bpqm, decode_single_codeword
+from decoders import (
+    LinearCode,
+    VarNodeCloner,
+    decode_bpqm,
+    decode_single_codeword,
+    decode_single_syndrome,
+)
 
 # Define an 8-bit code (see Section 6 of the paper)
 G = np.array([
@@ -100,3 +106,4 @@ print("Decoded bits:", decoded)
   * Provides the `LinearCode` class for enumerating codewords and building factor graphs.
 
 * **New:** Added `decode_single_codeword` function in `decoders.py` to directly decode an arbitrary codeword and return its measurement outcomes.
+* **New:** Added `decode_single_syndrome` function for decoding when a syndrome circuit has already been prepared.

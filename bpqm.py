@@ -1,4 +1,4 @@
-"""Utilities for building BPQM circuits with optional index offset for syndrome decoding."""
+"""Utilities to build BPQM subcircuits used by the decoders."""
 
 from typing import Dict, List, Tuple, Optional
 
@@ -15,9 +15,9 @@ def combine_variable(
     idx2: int,
     angles2: List[Tuple[float, Dict[int, int]]]
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Combine two variable nodes, applying `offset` to all qubit indices."""
-    # Apply offset to input indices
+    """Combine two variable nodes of the computation tree."""
 
+    # Accumulate output angles for the merged subtree
     angles_out: List[Tuple[float, Dict[int, int]]] = []
 
     # 1) Gather all original control-qubit indices
@@ -28,7 +28,7 @@ def combine_variable(
         ctrl_orig += list(angles2[0][1].keys())
     # unique preserve order
     ctrl_orig = list(dict.fromkeys(ctrl_orig))
-    # offset control indices
+    # maintain original control ordering
     control_qubits = [bit for bit in ctrl_orig]
 
     # 2) Prepare lookup arrays
@@ -39,7 +39,7 @@ def combine_variable(
     # 3) Compute α/β for each conditioning
     for t1, c1 in angles1:
         for t2, c2 in angles2:
-            # merge and offset control mappings
+            # merge control mappings
             orig_controls = {**c1, **c2}
             controls = {bit: val for bit, val in orig_controls.items()}
             angles_out.append((np.arccos(np.cos(t1)*np.cos(t2)), controls))
@@ -86,7 +86,7 @@ def combine_check(
     angles2: List[Tuple[float, Dict[int, int]]],
     check_id: Optional[int] = None,
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Combine two check nodes with optional syndrome phase and index offset."""
+    """Combine two check nodes and optionally apply a syndrome phase."""
     angles_out: List[Tuple[float, Dict[int, int]]] = []
 
     if check_id is not None:
@@ -100,7 +100,7 @@ def combine_check(
             tout_0 = np.arccos((np.cos(t1) + np.cos(t2)) / (1. + np.cos(t1)*np.cos(t2)))
             tout_1 = np.arccos((np.cos(t1) - np.cos(t2)) / (1. - np.cos(t1)*np.cos(t2)))
 
-            # map controls with offset
+            # map controls depending on the branch outcome
             ctrl0 = {bit: val for bit, val in orig_controls.items()}
             ctrl0[idx2] = 0
             ctrl1 = {bit: val for bit, val in orig_controls.items()}
