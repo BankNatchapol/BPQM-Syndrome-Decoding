@@ -167,7 +167,6 @@ def decode_single_codeword(
     code: LinearCode,
     cloner: Cloner,
     height: int,
-    order: Optional[Sequence[int]] = None,
     shots: int = 512,
     debug: bool = False,
     run_simulation: bool = True
@@ -204,8 +203,7 @@ def decode_single_codeword(
     qc_decode : QuantumCircuit
         The BPQM decoding circuit (without initialization).
     """
-    if order is None:
-        order = list(range(code.n))
+    order = list(range(code.n))
 
     # 1) Build all BPQM subcircuits
     cgraphs = [code.get_computation_graph(f"x{b}", height) for b in order]
@@ -298,11 +296,10 @@ def decode_single_codeword(
 
 def decode_single_syndrome(
     qc_init: QuantumCircuit,
+    syndrome_qc: QuantumCircuit,
     code: LinearCode,
     cloner: Cloner,
     height: int,
-    syndrome: Union[Sequence[int], np.ndarray],
-    order: Optional[Sequence[int]] = None,
     shots: int = 512,
     debug: bool = False,
     run_simulation: bool = True
@@ -341,17 +338,17 @@ def decode_single_syndrome(
     qc_decode : QuantumCircuit
         The BPQM decoding circuit (without initialization).
     """
-    if order is None:
-        order = list(range(code.n))
+    order = list(range(code.n))
 
     # Build conditioned BPQM subcircuits
     cgraphs = [
-        code.get_computation_graph(f"x{b}", height, syndrome=syndrome)
+        code.get_computation_graph(f"x{b}", height, syndrome_mode=True)
         for b in order
     ]
+    n_ancilla = code.hk
     n_data_qubits = max(sum(occ.values()) for _, occ, _ in cgraphs)
     n_data_qubits = max(n_data_qubits, code.n)
-    n_total_qubits = n_data_qubits + len(order) - 1
+    n_total_qubits = n_data_qubits + n_ancilla + len(order) - 1
 
     # Build the BPQM decode circuit
     qc_decode = QuantumCircuit(n_total_qubits)
@@ -372,29 +369,28 @@ def decode_single_syndrome(
         for leaf in leaves:
             graph.nodes[leaf]["qubit_idx"] = qubit_map[leaf]
         qc_bpqm   = QuantumCircuit(n_total_qubits)
-        meas_idx, _ = tree_bpqm(graph, qc_bpqm, root=root)
+        meas_idx, _ = tree_bpqm(graph, qc_bpqm, root=root, offset=n_ancilla)
         qc_cloner = cloner.generate_cloner_circuit(
-            graph, occ, qubit_map, n_total_qubits
+            graph, occ, qubit_map, n_data_qubits + len(order) - 1
         )
-
-        qc_decode.compose(qc_cloner, inplace=True)
+        qc_decode.compose(qc_cloner, qubits=range(n_ancilla, n_total_qubits), inplace=True)
         qc_decode.barrier()
         qc_decode.compose(qc_bpqm, inplace=True)
         qc_decode.barrier()
 
         if i < len(order) - 1:
             qc_decode.h(meas_idx)
-            qc_decode.cx(meas_idx, n_data_qubits + i)
+            qc_decode.cx(meas_idx, n_ancilla + n_data_qubits + i)
             qc_decode.h(meas_idx)
             qc_decode.barrier()
             qc_decode.compose(qc_bpqm.inverse(), inplace=True)
             qc_decode.barrier()
-            qc_decode.compose(qc_cloner.inverse(), inplace=True)
+            qc_decode.compose(qc_cloner.inverse(), qubits=range(n_ancilla, n_total_qubits), inplace=True)
             qc_decode.barrier()
         else:
             qc_decode.h(meas_idx)
 
-    decoded_qubits = list(range(n_data_qubits, n_data_qubits + len(order) - 1)) + [meas_idx]
+    decoded_qubits = list(range(n_ancilla + n_data_qubits, n_ancilla + n_data_qubits + len(order) - 1)) + [meas_idx]
 
     # If not running simulation, return placeholders
     if not run_simulation:
@@ -402,7 +398,9 @@ def decode_single_syndrome(
 
     # Otherwise, compose init + decode + measurements and run
     full_qc = QuantumCircuit(n_total_qubits, len(order))
-    full_qc.compose(qc_init, qubits=list(range(qc_init.num_qubits)), inplace=True)
+    full_qc.compose(syndrome_qc, qubits=list(range(n_ancilla)), inplace=True)
+    full_qc.compose(qc_init, qubits=list(range(n_ancilla, n_ancilla + qc_init.num_qubits)), inplace=True)
+    
     full_qc.compose(qc_decode, inplace=True)
     for idx, qb in enumerate(decoded_qubits):
         full_qc.measure(qb, idx)

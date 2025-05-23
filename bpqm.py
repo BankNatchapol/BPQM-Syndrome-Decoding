@@ -1,38 +1,35 @@
-"""Utilities for building BPQM circuits."""
+"""Utilities for building BPQM circuits with optional index offset for syndrome decoding."""
 
 from typing import Dict, List, Tuple, Optional
 
 import networkx as nx
-
 import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit.library import UCRYGate
 
-#
-# During the construction of the BPQM circuit we keep track of angles for each
-# qubit. Each angle is a list of ``(theta, controls)`` tuples where ``controls``
-# maps qubit indices to classical values on which the angle is conditioned.
-# This allows efficient generation of uniformly controlled rotations.
-#
 
 def combine_variable(
     qc: QuantumCircuit,
     idx1: int,
     angles1: List[Tuple[float, Dict[int, int]]],
     idx2: int,
-    angles2: List[Tuple[float, Dict[int, int]]],
+    angles2: List[Tuple[float, Dict[int, int]]]
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Combine two variable nodes and return the output qubit and angles."""
-    idx_out = idx1
-    angles_out = []
+    """Combine two variable nodes, applying `offset` to all qubit indices."""
+    # Apply offset to input indices
 
-    # 1) Gather all control-qubit indices
-    control_qubits = []
+    angles_out: List[Tuple[float, Dict[int, int]]] = []
+
+    # 1) Gather all original control-qubit indices
+    ctrl_orig = []
     if angles1:
-        control_qubits += list(angles1[0][1].keys())
+        ctrl_orig += list(angles1[0][1].keys())
     if angles2:
-        control_qubits += list(angles2[0][1].keys())
-    control_qubits = list(dict.fromkeys(control_qubits))  # unique & preserve order
+        ctrl_orig += list(angles2[0][1].keys())
+    # unique preserve order
+    ctrl_orig = list(dict.fromkeys(ctrl_orig))
+    # offset control indices
+    control_qubits = [bit for bit in ctrl_orig]
 
     # 2) Prepare lookup arrays
     n_ctrl = len(control_qubits)
@@ -42,13 +39,15 @@ def combine_variable(
     # 3) Compute α/β for each conditioning
     for t1, c1 in angles1:
         for t2, c2 in angles2:
-            controls = {**c1, **c2}
+            # merge and offset control mappings
+            orig_controls = {**c1, **c2}
+            controls = {bit: val for bit, val in orig_controls.items()}
             angles_out.append((np.arccos(np.cos(t1)*np.cos(t2)), controls))
 
-            # index into the multiplex array
+            # index into multiplex array using original order
             idx_bin = 0
-            for bit in control_qubits:
-                idx_bin = (idx_bin << 1) | controls.get(bit, 0)
+            for bit in ctrl_orig:
+                idx_bin = (idx_bin << 1) | orig_controls.get(bit, 0)
 
             a_min = (
                 np.cos(0.5*(t1-t2)) - np.cos(0.5*(t1+t2))
@@ -62,100 +61,84 @@ def combine_variable(
             angles_alpha[idx_bin] = alpha
             angles_beta[idx_bin]  = beta
 
-    # 4) Variable-node gadget
+    # 4) Variable-node gadget with offset indices
     qc.cx(idx2, idx1)
     qc.x(idx1)
     qc.cx(idx1, idx2)
     qc.x(idx1)
 
-    # 5) Reverse controls to match old ucry ordering
+    # 5) Reverse controls to match UCRY ordering
     reversed_ctrls = list(reversed(control_qubits))
-    # 6) Append the uniformly-controlled Ry’s
+    # 6) Append uniformly-controlled Ry's
     qc.append(UCRYGate(angles_alpha), [idx2] + reversed_ctrls)
     qc.cx(idx1, idx2)
     qc.append(UCRYGate(angles_beta),  [idx2] + reversed_ctrls)
     qc.cx(idx1, idx2)
 
-    return idx_out, angles_out
+    return idx1, angles_out
 
 
-"""
-Same as combine_variable, but for check node operation.
-"""
 def combine_check(
     qc: QuantumCircuit,
     idx1: int,
     angles1: List[Tuple[float, Dict[int, int]]],
     idx2: int,
     angles2: List[Tuple[float, Dict[int, int]]],
-    s_bit: Optional[int] = None
+    check_id: Optional[int] = None,
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Combine two check nodes analogous to :func:`combine_variable`."""
-    idx_out = idx1
-    angles_out = list()
+    """Combine two check nodes with optional syndrome phase and index offset."""
+    angles_out: List[Tuple[float, Dict[int, int]]] = []
 
-    if s_bit:
-        qc.z(idx1)
-
+    if check_id is not None:
+        qc.cz(check_id, idx1)
     qc.cx(idx1, idx2)
-    for t1,c1 in angles1:
-        for t2,c2 in angles2:
-            controls = {**c1, **c2} # merge dictionaries
 
-            # branch 1
-            tout_0 = np.arccos( (np.cos(t1)+np.cos(t2)) / (1. + np.cos(t1)*np.cos(t2)) )
-            cout_0 = controls.copy()
-            cout_0[idx2] = 0
-            # branch 2
-            tout_1 = np.arccos( (np.cos(t1)-np.cos(t2)) / (1. - np.cos(t1)*np.cos(t2)) )
-            cout_1 = controls.copy()
-            cout_1[idx2] = 1
+    for t1, c1 in angles1:
+        for t2, c2 in angles2:
+            orig_controls = {**c1, **c2}
+            # branch outputs
+            tout_0 = np.arccos((np.cos(t1) + np.cos(t2)) / (1. + np.cos(t1)*np.cos(t2)))
+            tout_1 = np.arccos((np.cos(t1) - np.cos(t2)) / (1. - np.cos(t1)*np.cos(t2)))
 
-            angles_out.append((tout_0, cout_0))
-            angles_out.append((tout_1, cout_1))
+            # map controls with offset
+            ctrl0 = {bit: val for bit, val in orig_controls.items()}
+            ctrl0[idx2] = 0
+            ctrl1 = {bit: val for bit, val in orig_controls.items()}
+            ctrl1[idx2] = 1
 
-    return idx_out, angles_out
+            angles_out.append((tout_0, ctrl0))
+            angles_out.append((tout_1, ctrl1))
 
-"""
-Input:
-* a networkx graph 'tree' that represents a factor graph. Each node of the graph
-  must have the attribute 'type' that must be iether 'variable', 'check' or 'output'.
-  Furthermore the output nodes require an attribute 'angle' and 'qubit_idx'. The latter
-  specifies which qubit index is used in the quantum circuit.
-* a qsikit.QuantumCircuit object 'qc' onto which the BPQM circuit operations are applied
-* The root node 'root' of 'tree' which determines which bit of the code is to be determined by BPQM
+    return idx1, angles_out
 
-Returns:
-* Index of final qubit in circuit (onto which you want to perform the Helstrom measurement)
-* Angles of output qubit (under the assumption that input of circuit respects the factor graph 'tree')
-"""
+
 def tree_bpqm(
     tree: nx.DiGraph,
     qc: QuantumCircuit,
     root: str,
+    offset: int = 0
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Recursively build the BPQM circuit for ``tree`` rooted at ``root``."""
+    """Recursively build a BPQM circuit for ``tree`` rooted at ``root``, applying ``offset`` to all indices."""
     succs = list(tree.successors(root))
-    num_succ = len(succs)
+    # leaf
+    if not succs:
+        leaf_idx = tree.nodes[root]["qubit_idx"] + offset
+        return leaf_idx, tree.nodes[root]["angle"]
+    # single child
+    if len(succs) == 1:
+        return tree_bpqm(tree, qc, succs[0], offset=offset)
 
-    if num_succ == 0:
-        # root is a leaf
-        assert tree.nodes[root]["type"] == "output"
-        return tree.nodes[root]["qubit_idx"], tree.nodes[root]["angle"]
-
-    if num_succ == 1:
-        # do nothing
-        return tree_bpqm(tree, qc, succs[0])
-
-    # >= 2 descendents: combine them 2 at a time
-    idx, angles = tree_bpqm(tree, qc, succs[0])
-    for i in range(1, num_succ):
-        idx2, angles2 = tree_bpqm(tree, qc, succs[i])
-        type = tree.nodes[root]["type"] 
-        if type == "variable":
+    # combine children
+    idx, angles = tree_bpqm(tree, qc, succs[0], offset=offset)
+    for child in succs[1:]:
+        idx2, angles2 = tree_bpqm(tree, qc, child, offset=offset)
+        ntype = tree.nodes[root]["type"]
+        if ntype == "variable":
             idx, angles = combine_variable(qc, idx, angles, idx2, angles2)
-        elif type == "check":
-            s_bit = tree.nodes[root].get("syndrome")
-            idx, angles = combine_check(qc, idx, angles, idx2, angles2, s_bit)
-        else: raise
+        elif ntype == "check":
+            
+            check_id = tree.nodes[root].get("check_idx")
+            idx, angles = combine_check(qc, idx, angles, idx2, angles2, check_id)
+        else:
+            raise ValueError(f"Unknown node type '{ntype}'")
     return idx, angles

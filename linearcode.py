@@ -51,6 +51,7 @@ class LinearCode:
     def __init__(self, G: Optional[NDArray], H: NDArray):
         self.H = np.asarray(H, dtype=int)
         self.n = self.H.shape[1]
+        self.hk = H.shape[0]
         if G is not None:
             self.G = np.asarray(G, dtype=int)
             if self.G.shape[1] != self.n:
@@ -256,7 +257,7 @@ class LinearCode:
         root: str,
         height: int,
         cloner: Optional[Any] = None,
-        syndrome: Optional[Union[Sequence[int], NDArray[np.int_]]] = None
+        syndrome_mode: bool = False
     ) -> Tuple[nx.DiGraph, Dict[str, int], Optional[str]]:
         """
         Unroll the factor graph for message passing.
@@ -294,16 +295,15 @@ class LinearCode:
                 var_occ[node] += 1
                 directed.add_node(label, type=ntype)
             else:
-                if syndrome is None:
-                    label = f"c{check_counter}"
-                    check_counter += 1
-                    directed.add_node(label, type=ntype)
-                else:
+                if syndrome_mode:
                     label = f"{node}_{check_occ[node]}"
                     directed.add_node(label,
                             type=ntype,
-                            check_idx=int(node.replace("c","")),
-                            syndrome=syndrome[int(node.replace("c",""))])
+                            check_idx=int(node.replace("c","")))
+                else:
+                    label = f"c{check_counter}"
+                    check_counter += 1
+                    directed.add_node(label, type=ntype)
             
             for neighbor in fg.neighbors(node):
                 if neighbor == parent:
