@@ -1,6 +1,6 @@
 """High-level decoding routines for BPQM and classical benchmarks."""
 
-from typing import Optional, Sequence, Union, Tuple
+from typing import Optional, Sequence, Union, Tuple, List
 
 import numpy as np
 from numpy.typing import NDArray
