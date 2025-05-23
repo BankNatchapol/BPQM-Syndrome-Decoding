@@ -10,6 +10,7 @@ Forked from [https://github.com/ChriPiv/quantum-message-passing-paper](https://g
 
    ```bash
    pip install numpy==2.2.5 scipy==1.15.3
+   pip install pylatexenc==2.10
    pip install -r requirements.txt
    ```
 
