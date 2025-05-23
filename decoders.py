@@ -119,37 +119,38 @@ def decode_single_codeword(
     codeword: Union[Sequence[int], NDArray[np.int_]],
     order: Optional[Sequence[int]] = None,
     shots: int = 512,
+    debug: bool = False
 ) -> NDArray[np.int_]:
-    """Decode the provided ``codeword`` using BPQM.
+    """
+    Decode a transmitted codeword via BPQM, printing sorted measurement counts.
 
     Parameters
     ----------
-    code:
-        Linear code to decode.
-    theta:
-        Channel angle.
-    cloner:
-        Cloner instance used for loopy graphs.
-    height:
-        Unrolling depth of the BPQM tree.
-    codeword:
-        List or array of ``0``/``1`` describing the transmitted codeword.
-    order:
-        Optional list of bit indices to decode. Defaults to ``range(code.k)``.
-    shots:
-        Number of measurement shots for the simulation.
+    code : LinearCode
+        The linear code object containing H-matrix and graph routines.
+    theta : float
+        Channel rotation angle (in radians) used to prepare |Q(0,θ)⟩ and |Q(1,θ)⟩.
+    cloner : Cloner
+        Cloner instance for handling loopy (non-tree) portions of the factor graph.
+    height : int
+        Unrolling depth of the BPQM computation tree.
+    codeword : Sequence[int] or NDArray[int]
+        Transmitted bitstring (0/1) of length `code.n`.
+    order : Sequence[int], optional
+        The bit positions (indices) to decode, defaults to `range(code.n)`.
+    shots : int, default=512
+        Number of simulator measurement shots.
 
     Returns
     -------
-    NDArray
-        The decoded bitstring in the order specified by ``order`` as a NumPy array of ints.
+    NDArray[int]
+        The decoded bitstring (in the same `order`) as a NumPy array of 0s and 1s.
     """
-
     if order is None:
         order = list(range(code.n))
 
+    # Build and combine all BPQM circuits
     cgraphs = [code.get_computation_graph(f"x{b}", height) for b in order]
-
     n_data_qubits = max(sum(occ.values()) for _, occ, _ in cgraphs)
     n_data_qubits = max(n_data_qubits, code.n)
     n_total_qubits = n_data_qubits + len(order) - 1
@@ -157,8 +158,144 @@ def decode_single_codeword(
     qc_decode = QuantumCircuit(n_total_qubits)
     meas_idx = 0
     for i, (graph, occ, root) in enumerate(cgraphs):
-        leaves = [n for n in graph.nodes() if graph.nodes[n]["type"] == "output"]
-        leaves = sorted(leaves, key=lambda s: int(s.split("_")[1]))
+        # assign qubit indices for the outputs ("y" nodes)
+        leaves = sorted(
+            [n for n in graph.nodes() if graph.nodes[n]["type"] == "output"],
+            key=lambda s: int(s.split("_")[1])
+        )
+        qubit_map = {f"y{j}_0": j for j in range(code.n)}
+        idx = code.n
+        for leaf in leaves:
+            if int(leaf.split("_")[1]) > 0:
+                qubit_map[leaf] = idx
+                idx += 1
+
+        # mark angles and set up the BPQM & cloner subcircuits
+        cloner.mark_angles(graph, occ)
+        for leaf in leaves:
+            graph.nodes[leaf]["qubit_idx"] = qubit_map[leaf]
+        qc_bpqm = QuantumCircuit(n_total_qubits)
+        meas_idx, _ = tree_bpqm(graph, qc_bpqm, root=root)
+        qc_cloner = cloner.generate_cloner_circuit(graph, occ, qubit_map, n_total_qubits)
+
+        # stitch together cloner → bpqm → uncompute (if not last bit)
+        qc_decode.compose(qc_cloner, inplace=True)
+        qc_decode.barrier()
+        qc_decode.compose(qc_bpqm, inplace=True)
+        qc_decode.barrier()
+
+        if i < len(order) - 1:
+            qc_decode.h(meas_idx)
+            qc_decode.cx(meas_idx, n_data_qubits + i)
+            qc_decode.h(meas_idx)
+            qc_decode.barrier()
+            qc_decode.compose(qc_bpqm.inverse(), inplace=True)
+            qc_decode.barrier()
+            qc_decode.compose(qc_cloner.inverse(), inplace=True)
+            qc_decode.barrier()
+        else:
+            qc_decode.h(meas_idx)
+
+    decoded_qubits = list(range(n_data_qubits, n_data_qubits + len(order) - 1)) + [meas_idx]
+
+    # prepare initialization circuit
+    qc = QuantumCircuit(n_total_qubits, len(order))
+    plus = np.array([np.cos(0.5 * theta), np.sin(0.5 * theta)])
+    minus = np.array([np.cos(0.5 * theta), -np.sin(0.5 * theta)])
+    plus /= np.linalg.norm(plus)
+    minus /= np.linalg.norm(minus)
+    for j, bit in enumerate(codeword):
+        state = (plus if bit == 0 else minus).tolist()
+        qc.initialize(state, [j])
+
+    qc.compose(qc_decode, inplace=True)
+    for idx, qb in enumerate(decoded_qubits):
+        qc.measure(qb, idx)
+
+    # run and fetch counts
+    backend = AerSimulator()
+    qc_compiled = transpile(qc, backend)
+    job = backend.run(qc_compiled, shots=shots)
+    result = job.result().get_counts()
+
+    # reverse bit‐order in keys and sort by descending counts
+    reversed_counts = { bits[::-1]: cnt for bits, cnt in result.items() }
+    sorted_counts = dict(sorted(
+        reversed_counts.items(),
+        key=lambda item: item[1],
+        reverse=True
+    ))
+
+    # pretty‐print
+    if debug:
+        print("Counts:")
+        for bits, cnt in sorted_counts.items():
+            syndrome_vec = np.array([int(b) for b in bits]) @ code.H.T % 2
+            print(f"  {bits} → {cnt} : syndrome {syndrome_vec}")
+
+    # select the most likely decoded string
+    most_likely = next(iter(sorted_counts))
+    decoded = np.array([int(b) for b in most_likely], dtype=int)
+    return decoded
+
+
+def decode_single_syndrome(
+    code: LinearCode,
+    cloner: Cloner,
+    theta: float,
+    height: int,
+    syndrome: Union[Sequence[int], NDArray[np.int_]],
+    prior: float = 0.5,
+    order: Optional[Sequence[int]] = None,
+    shots: int = 512,
+    debug: bool = False
+) -> NDArray[np.int_]:
+    """
+    Decode from a given syndrome using BPQM, printing sorted measurement counts.
+
+    Parameters
+    ----------
+    code : LinearCode
+        The linear code whose parity‐check matrix H defines the syndrome.
+    cloner : Cloner
+        Cloner instance for loopy factor‐graph portions.
+    theta : float
+        Channel rotation angle (in radians) for amplitude‐encoding bits.
+    height : int
+        Depth to unroll the BPQM computation tree.
+    syndrome : Sequence[int] or NDArray[int]
+        Observed syndrome vector (length = n–k) used to condition the circuit.
+    prior : float, default=0.5
+        Prior probability for bit = 0 vs. 1, used for initializing all data qubits.
+    order : Sequence[int], optional
+        Bit indices defining decoding order, defaults to `range(code.n)`.
+    shots : int, default=512
+        Number of measurement shots for statistical sampling.
+
+    Returns
+    -------
+    NDArray[int]
+        The decoded bit‐string (in the specified `order`) as a NumPy array of 0s and 1s.
+    """
+    if order is None:
+        order = list(range(code.n))
+
+    # build conditioned computation graphs
+    cgraphs = [
+        code.get_computation_graph(f"x{b}", height, syndrome=syndrome)
+        for b in order
+    ]
+    n_data_qubits = max(sum(occ.values()) for _, occ, _ in cgraphs)
+    n_data_qubits = max(n_data_qubits, code.n)
+    n_total_qubits = n_data_qubits + len(order) - 1
+
+    qc_decode = QuantumCircuit(n_total_qubits)
+    meas_idx = 0
+    for i, (graph, occ, root) in enumerate(cgraphs):
+        leaves = sorted(
+            [n for n in graph.nodes() if graph.nodes[n]["type"] == "output"],
+            key=lambda s: int(s.split("_")[1])
+        )
         qubit_map = {f"y{j}_0": j for j in range(code.n)}
         idx = code.n
         for leaf in leaves:
@@ -193,26 +330,44 @@ def decode_single_codeword(
 
     decoded_qubits = list(range(n_data_qubits, n_data_qubits + len(order) - 1)) + [meas_idx]
 
+    # initialize all data qubits with the prior‐weighted superposition
     qc = QuantumCircuit(n_total_qubits, len(order))
     plus = np.array([np.cos(0.5 * theta), np.sin(0.5 * theta)])
     minus = np.array([np.cos(0.5 * theta), -np.sin(0.5 * theta)])
-    for j, bit in enumerate(codeword):
-        state = (plus if bit == 0 else minus).tolist()  
+    state = prior * plus + (1 - prior) * minus
+    state = (state / np.linalg.norm(state)).tolist()
+    for j in range(code.n):
         qc.initialize(state, [j])
 
     qc.compose(qc_decode, inplace=True)
-
     for idx, qb in enumerate(decoded_qubits):
         qc.measure(qb, idx)
 
+    # run and fetch counts
     backend = AerSimulator()
     qc_compiled = transpile(qc, backend)
     job = backend.run(qc_compiled, shots=shots)
     result = job.result().get_counts()
 
-    most_likely = max(result.items(), key=lambda kv: kv[1])[0]
-    decoded = [int(bit) for bit in most_likely[::-1]]
-    return np.array(decoded, dtype=int)
+    # reverse bits in keys and sort descending by counts
+    reversed_counts = { bits[::-1]: cnt for bits, cnt in result.items() }
+    sorted_counts = dict(sorted(
+        reversed_counts.items(),
+        key=lambda item: item[1],
+        reverse=True
+    ))
+
+    if debug:
+        print("Counts:")
+        for bits, cnt in sorted_counts.items():
+            syndrome_vec = np.array([int(b) for b in bits]) @ code.H.T % 2
+            print(f"  {bits} → {cnt} : syndrome {syndrome_vec}")
+
+    # take the highest‐probability outcome
+    most_likely = next(iter(sorted_counts))
+    decoded = np.array([int(b) for b in most_likely], dtype=int)
+    return decoded
+
 
 def decode_bit_optimal_quantum(code: LinearCode, theta: float, index: int) -> float:
     rho0 = np.zeros((2**code.n, 2**code.n), complex)
@@ -310,3 +465,4 @@ def decode_codeword_optimal_classical(code: LinearCode, theta: float) -> float:
                      p_r**sum(int(b) == yi for b, yi in zip(best, y))) /
                     len(codewords))
     return success
+

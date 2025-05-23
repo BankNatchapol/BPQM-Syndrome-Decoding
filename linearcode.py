@@ -2,7 +2,7 @@
 import re
 import numpy as np
 import networkx as nx
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Sequence, Union
 from numpy.typing import NDArray
 
 __all__ = ["LinearCode"]
@@ -255,7 +255,8 @@ class LinearCode:
         self,
         root: str,
         height: int,
-        cloner: Optional[Any] = None
+        cloner: Optional[Any] = None,
+        syndrome: Optional[Union[Sequence[int], NDArray[np.int_]]] = None
     ) -> Tuple[nx.DiGraph, Dict[str, int], Optional[str]]:
         """
         Unroll the factor graph for message passing.
@@ -277,7 +278,8 @@ class LinearCode:
         """
         fg = self.get_factor_graph()
         directed = nx.DiGraph()
-        occurrences = {v: 0 for v in fg.nodes if fg.nodes[v]["type"] == "variable"}
+        var_occ = {v: 0 for v in fg.nodes if fg.nodes[v]["type"] == "variable"}
+        check_occ = {c: 0 for c in fg.nodes() if fg.nodes[c]["type"]=="check"}
         check_counter = 0
         max_depth = 2 * height + 1
 
@@ -288,13 +290,21 @@ class LinearCode:
 
             ntype = fg.nodes[node]["type"]
             if ntype == "variable":
-                label = f"{node}_{occurrences[node]}"
-                occurrences[node] += 1
+                label = f"{node}_{var_occ[node]}"
+                var_occ[node] += 1
+                directed.add_node(label, type=ntype)
             else:
-                label = f"c{check_counter}"
-                check_counter += 1
-
-            directed.add_node(label, type=ntype)
+                if syndrome is None:
+                    label = f"c{check_counter}"
+                    check_counter += 1
+                    directed.add_node(label, type=ntype)
+                else:
+                    label = f"{node}_{check_occ[node]}"
+                    directed.add_node(label,
+                            type=ntype,
+                            check_idx=int(node.replace("c","")),
+                            syndrome=syndrome[int(node.replace("c",""))])
+            
             for neighbor in fg.neighbors(node):
                 if neighbor == parent:
                     continue
@@ -306,8 +316,9 @@ class LinearCode:
                 out_label = label.replace("x", "y")
                 directed.add_node(out_label, type="output")
                 directed.add_edge(label, out_label)
+            
 
             return label
 
         new_root = _expand(root, None, 0)
-        return directed, occurrences, new_root
+        return directed, var_occ, new_root

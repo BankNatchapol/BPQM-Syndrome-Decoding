@@ -1,6 +1,6 @@
 """Utilities for building BPQM circuits."""
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import networkx as nx
 
@@ -88,10 +88,14 @@ def combine_check(
     angles1: List[Tuple[float, Dict[int, int]]],
     idx2: int,
     angles2: List[Tuple[float, Dict[int, int]]],
+    s_bit: Optional[int] = None
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
     """Combine two check nodes analogous to :func:`combine_variable`."""
     idx_out = idx1
     angles_out = list()
+
+    if s_bit:
+        qc.z(idx1)
 
     qc.cx(idx1, idx2)
     for t1,c1 in angles1:
@@ -151,6 +155,7 @@ def tree_bpqm(
         if type == "variable":
             idx, angles = combine_variable(qc, idx, angles, idx2, angles2)
         elif type == "check":
-            idx, angles = combine_check(qc, idx, angles, idx2, angles2)
+            s_bit = tree.nodes[root].get("syndrome")
+            idx, angles = combine_check(qc, idx, angles, idx2, angles2, s_bit)
         else: raise
     return idx, angles
