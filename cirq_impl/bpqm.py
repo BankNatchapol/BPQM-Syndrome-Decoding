@@ -5,6 +5,68 @@ Cirq version of BPQM main logic.
 # TODO: Implement Cirq-based BPQM logic here
 
 import cirq
+import numpy as np
+import networkx as nx
+from typing import List, Tuple, Dict, Optional
+
+import math
+class UCRY(cirq.Gate):
+    """Uniformly controlled RY rotation—for k controls inferred from angles length."""
+
+    def __init__(self, angles: List[float], num_controls: int = 0):
+        """
+        Initialize UCRY gate.
+        
+        Args:
+            angles: List of angles for each control configuration
+            num_controls: Number of control qubits
+        """
+        self.angles = angles
+        self.num_controls = num_controls
+
+    def _num_qubits_(self) -> int:
+        return self.num_controls + 1
+
+    def _decompose_(self, qubits):
+        ctrls = qubits[: self.num_controls]
+        tgt = qubits[self.num_controls]
+        # No controls: single RY
+        if self.num_controls == 0:
+            theta = self.angles[0]
+            if not np.isclose(theta, 0):
+                yield cirq.ry(theta).on(tgt)
+            return
+
+        # Decompose for each control pattern
+        for i, theta in enumerate(self.angles):
+            if theta is None or np.isclose(theta, 0):
+                continue
+            bits = format(i, f'0{self.num_controls}b')
+            # Flip controls where bit == '0'
+            for idx, b in enumerate(bits):
+                if b == '0':
+                    yield cirq.X(ctrls[idx])
+            # Apply multi-controlled RY
+            yield cirq.ControlledGate(cirq.ry(theta), num_controls=self.num_controls)(*ctrls, tgt)
+            # Uncompute flips
+            for idx, b in enumerate(bits):
+                if b == '0':
+                    yield cirq.X(ctrls[idx])
+
+    def _inverse_(self):
+        return UCRY([-theta if theta is not None else None for theta in self.angles])
+
+    def _circuit_diagram_info_(self, args):
+        symbols = [f"c{j}" for j in range(self.num_controls)] + ["RY"]
+        return cirq.CircuitDiagramInfo(wire_symbols=symbols)
+
+    def _value_equality_values_(self):
+        return (self.angles,)
+
+    def __repr__(self):
+        return f"UCRY(angles={list(self.angles)})"
+    __str__ = __repr__
+
 
 class CirqBPQM:
     def __init__(self):
@@ -13,32 +75,26 @@ class CirqBPQM:
 
 """Utilities to build BPQM subcircuits - Cirq version."""
 
-from typing import Dict, List, Tuple, Optional
-
-import networkx as nx
-import numpy as np
-import cirq
-
-
 def combine_variable_cirq(
     circuit: cirq.Circuit,
-    qubits: List[cirq.Qid],
     idx1: int,
     angles1: List[Tuple[float, Dict[int, int]]],
     idx2: int,
     angles2: List[Tuple[float, Dict[int, int]]]
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Combine two variable nodes of the computation tree - Cirq version."""
-    
+    """
+    Combine two variable nodes of the computation tree - Cirq version.
+    This is a direct port of the Qiskit implementation.
+    """
     # Accumulate output angles for the merged subtree
     angles_out: List[Tuple[float, Dict[int, int]]] = []
 
-    # 1) Gather all original control-qubit indices
+    # 1) Gather all original control-qubit indices, preserving order like Qiskit.
     ctrl_orig = []
     if angles1:
-        ctrl_orig += list(angles1[0][1].keys())
+        ctrl_orig.extend(angles1[0][1].keys())
     if angles2:
-        ctrl_orig += list(angles2[0][1].keys())
+        ctrl_orig.extend(angles2[0][1].keys())
     # unique preserve order
     ctrl_orig = [bit for bit in dict.fromkeys(ctrl_orig) if bit != idx2]
     # maintain original control ordering
@@ -74,117 +130,60 @@ def combine_variable_cirq(
             angles_alpha[idx_bin] = alpha
             angles_beta[idx_bin]  = beta
 
-    # 4) Variable-node gadget with offset indices
-    circuit.append(cirq.CNOT(qubits[idx2], qubits[idx1]))
-    circuit.append(cirq.X(qubits[idx1]))
-    circuit.append(cirq.CNOT(qubits[idx1], qubits[idx2]))
-    circuit.append(cirq.X(qubits[idx1]))
+    # 4) Variable-node gadget
+    circuit.append(cirq.CNOT(cirq.LineQubit(idx2), cirq.LineQubit(idx1)))
+    circuit.append(cirq.X(cirq.LineQubit(idx1)))
+    circuit.append(cirq.CNOT(cirq.LineQubit(idx1), cirq.LineQubit(idx2)))
+    circuit.append(cirq.X(cirq.LineQubit(idx1)))
 
-    # 5) Reverse controls to match UCRY ordering
-    reversed_ctrls = list(reversed(control_qubits))
+    # 5) Reverse controls to match Qiskit's UCRYGate ordering convention.
+    reversed_ctrls = list(control_qubits)
     
-    # 6) Append uniformly-controlled Ry's using Cirq
-    # Create controlled Ry gates for each control configuration
-    if control_qubits:
-        # Create a controlled rotation gate
-        for i in range(2**n_ctrl):
-            if angles_alpha[i] is not None:
-                # Determine control values from binary representation
-                control_vals = []
-                temp_i = i
-                for _ in range(n_ctrl):
-                    control_vals.append(temp_i & 1)
-                    temp_i >>= 1
-                control_vals.reverse()
-                
-                # Create controlled Ry gate
-                ops = []
-                # Add control conditions
-                for j, ctrl_idx in enumerate(reversed_ctrls):
-                    if control_vals[j] == 0:
-                        ops.append(cirq.X(qubits[ctrl_idx]))
-                
-                # Add controlled rotation
-                if n_ctrl == 0:
-                    ops.append(cirq.ry(angles_alpha[i])(qubits[idx2]))
-                else:
-                    ctrl_qubits = [qubits[idx] for idx in reversed_ctrls]
-                    ops.append(cirq.ControlledGate(
-                        cirq.ry(angles_alpha[i]), 
-                        num_controls=n_ctrl
-                    )(*ctrl_qubits, qubits[idx2]))
-                
-                # Remove control conditions
-                for j, ctrl_idx in enumerate(reversed_ctrls):
-                    if control_vals[j] == 0:
-                        ops.append(cirq.X(qubits[ctrl_idx]))
-                
-                circuit.append(ops)
-    else:
-        # No controls, just apply the rotation
-        if angles_alpha[0] is not None:
-            circuit.append(cirq.ry(angles_alpha[0])(qubits[idx2]))
+    # 6) Append uniformly-controlled Ry's
+    # Our Cirq UCRY is controls + [target].
+    # We must match the qiskit control order, which is reversed.
+    ucry_alpha_qubits = [cirq.LineQubit(i) for i in reversed_ctrls] + [cirq.LineQubit(idx2)] 
+    ucry_beta_qubits = [cirq.LineQubit(i) for i in reversed_ctrls] + [cirq.LineQubit(idx2)]
     
-    circuit.append(cirq.CNOT(qubits[idx1], qubits[idx2]))
+    # 7) Append uniformly-controlled Ry's
+    ucry_alpha = UCRY(angles_alpha, num_controls=len(control_qubits))
+    circuit.append(ucry_alpha(*ucry_alpha_qubits))
     
-    # Similar for beta angles
-    if control_qubits:
-        for i in range(2**n_ctrl):
-            if angles_beta[i] is not None:
-                control_vals = []
-                temp_i = i
-                for _ in range(n_ctrl):
-                    control_vals.append(temp_i & 1)
-                    temp_i >>= 1
-                control_vals.reverse()
-                
-                ops = []
-                for j, ctrl_idx in enumerate(reversed_ctrls):
-                    if control_vals[j] == 0:
-                        ops.append(cirq.X(qubits[ctrl_idx]))
-                
-                if n_ctrl == 0:
-                    ops.append(cirq.ry(angles_beta[i])(qubits[idx2]))
-                else:
-                    ctrl_qubits = [qubits[idx] for idx in reversed_ctrls]
-                    ops.append(cirq.ControlledGate(
-                        cirq.ry(angles_beta[i]), 
-                        num_controls=n_ctrl
-                    )(*ctrl_qubits, qubits[idx2]))
-                
-                for j, ctrl_idx in enumerate(reversed_ctrls):
-                    if control_vals[j] == 0:
-                        ops.append(cirq.X(qubits[ctrl_idx]))
-                
-                circuit.append(ops)
-    else:
-        if angles_beta[0] is not None:
-            circuit.append(cirq.ry(angles_beta[0])(qubits[idx2]))
+    circuit.append(cirq.CNOT(cirq.LineQubit(idx1), cirq.LineQubit(idx2)))
+
+    ucry_beta = UCRY(angles_beta, num_controls=len(control_qubits))
+    circuit.append(ucry_beta(*ucry_beta_qubits))
     
-    circuit.append(cirq.CNOT(qubits[idx1], qubits[idx2]))
+    circuit.append(cirq.CNOT(cirq.LineQubit(idx1), cirq.LineQubit(idx2)))
 
     return idx1, angles_out
 
 
 def combine_check_cirq(
     circuit: cirq.Circuit,
-    qubits: List[cirq.Qid],
     idx1: int,
     angles1: List[Tuple[float, Dict[int, int]]],
     idx2: int,
     angles2: List[Tuple[float, Dict[int, int]]],
-    check_id: Optional[int] = None,
+    check_id: int
 ) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-    """Combine two check nodes and optionally apply a syndrome phase - Cirq version."""
+    """
+    Combine two check nodes in a BPQM circuit - Cirq version.
+    This is a direct port of the Qiskit implementation.
+    """
     angles_out: List[Tuple[float, Dict[int, int]]] = []
-    if check_id is not None:
-        circuit.append(cirq.CZ(qubits[check_id], qubits[idx1]))
-    circuit.append(cirq.CNOT(qubits[idx1], qubits[idx2]))
 
+    # Apply gates - match Qiskit logic
+    if check_id is not None:
+        circuit.append(cirq.CZ(cirq.LineQubit(check_id), cirq.LineQubit(idx1)))
+    circuit.append(cirq.CNOT(cirq.LineQubit(idx1), cirq.LineQubit(idx2)))
+
+    # Combine angles with branching - match Qiskit logic
     for t1, c1 in angles1:
         for t2, c2 in angles2:
             orig_controls = {**c1, **c2}
-            # branch outputs
+
+            # Branch outputs - handle potential division by zero
             tout_0 = np.arccos((np.cos(t1) + np.cos(t2)) / (1. + np.cos(t1)*np.cos(t2)))
             tout_1 = np.arccos((np.cos(t1) - np.cos(t2)) / (1. - np.cos(t1)*np.cos(t2)))
 
@@ -202,53 +201,38 @@ def combine_check_cirq(
 
 def tree_bpqm_cirq(
     tree: nx.DiGraph,
-    qubits: List[cirq.Qid],
+    circuit: cirq.Circuit,
     root: str,
     offset: int = 0
-) -> Tuple[cirq.Circuit, int]:
-    """Recursively build a BPQM circuit for tree rooted at root - Cirq version.
-    
-    Returns:
-        circuit: The Cirq circuit
-        meas_idx: The index of the measurement qubit
-    """
-    circuit = cirq.Circuit()
-    
-    def _recurse(node: str) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
-        succs = list(tree.successors(node))
-        
-        # leaf
-        if not succs:
-            leaf_idx = tree.nodes[node]["qubit_idx"]
-            if hasattr(leaf_idx, 'x'):  # If it's a Qid object
-                leaf_idx = leaf_idx.x
-            leaf_idx += offset
-            return leaf_idx, tree.nodes[node]["angle"]
-        
-        # single child
-        if len(succs) == 1:
-            idx_child, angles_child = _recurse(succs[0])
-            if tree.nodes[node]["type"] == "check":
-                check_id = tree.nodes[node].get("check_idx")
-                if check_id is not None:
-                    circuit.append(cirq.CZ(qubits[check_id], qubits[idx_child]))
-            return idx_child, angles_child
+) -> Tuple[int, List[Tuple[float, Dict[int, int]]]]:
+    """Recursively build a BPQM circuit for ``tree`` rooted at ``root``, applying ``offset`` to all indices."""
+    succs = list(tree.successors(root))
+    # leaf
+    if not succs:
+        leaf_idx = tree.nodes[root]["qubit_idx"] + offset
+        return leaf_idx, tree.nodes[root]["angle"]
+    # single child
+    if len(succs) == 1:
+        idx_child, angles_child = tree_bpqm_cirq(tree, circuit, succs[0], offset=offset)
+        if tree.nodes[root]["type"] == "check":
+            check_id = tree.nodes[root].get("check_idx")
+            if check_id is not None:
+                circuit.append(cirq.CZ(cirq.LineQubit(check_id), cirq.LineQubit(idx_child)))
+        return idx_child, angles_child
 
-        # combine children
-        idx, angles = _recurse(succs[0])
-        for child in succs[1:]:
-            idx2, angles2 = _recurse(child)
-            ntype = tree.nodes[node]["type"]
-            if ntype == "variable":
-                if idx == idx2:  # temporary fix
-                    continue
-                idx, angles = combine_variable_cirq(circuit, qubits, idx, angles, idx2, angles2)
-            elif ntype == "check":
-                check_id = tree.nodes[node].get("check_idx")
-                idx, angles = combine_check_cirq(circuit, qubits, idx, angles, idx2, angles2, check_id)
-            else:
-                raise ValueError(f"Unknown node type '{ntype}'")
-        return idx, angles
-    
-    meas_idx, _ = _recurse(root)
-    return circuit, meas_idx 
+    # combine children
+    idx, angles = tree_bpqm_cirq(tree, circuit, succs[0], offset=offset)
+    for child in succs[1:]:
+        idx2, angles2 = tree_bpqm_cirq(tree, circuit, child, offset=offset)
+        ntype = tree.nodes[root]["type"]
+        if ntype == "variable":
+            if idx == idx2: # temporary fix
+                continue
+            idx, angles = combine_variable_cirq(circuit, idx, angles, idx2, angles2)
+        elif ntype == "check":
+            check_id = tree.nodes[root].get("check_idx")
+            idx, angles = combine_check_cirq(circuit, idx, angles, idx2, angles2, check_id)
+        else:
+            raise ValueError(f"Unknown node type '{ntype}'")
+
+    return idx, angles

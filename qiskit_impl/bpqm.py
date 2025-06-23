@@ -72,7 +72,6 @@ def combine_variable(
 
     # 5) Reverse controls to match UCRY ordering
     reversed_ctrls = list(reversed(control_qubits))
-    # 6) Append uniformly-controlled Ry's
     qc.append(UCRYGate(angles_alpha), [idx2] + reversed_ctrls)
     qc.cx(idx1, idx2)
     qc.append(UCRYGate(angles_beta),  [idx2] + reversed_ctrls)
@@ -149,4 +148,5 @@ def tree_bpqm(
             idx, angles = combine_check(qc, idx, angles, idx2, angles2, check_id)
         else:
             raise ValueError(f"Unknown node type '{ntype}'")
+
     return idx, angles

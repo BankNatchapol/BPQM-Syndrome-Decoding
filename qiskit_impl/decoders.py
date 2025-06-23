@@ -399,12 +399,13 @@ def decode_single_syndrome(
         codeword=codeword,
         prior=prior
     )
+    
     qc_decode.compose(
         data_init,
         qubits=list(range(n_ancilla, n_ancilla + n_data)),
         inplace=True
     )
-
+    
     # Build and apply BPQM for each logical qubit
     for idx, (graph, occ, root) in enumerate(computation_graphs):
         # Map output nodes to qubit indices
@@ -432,6 +433,7 @@ def decode_single_syndrome(
         # Construct BPQM subcircuit
         qc_bpqm = QuantumCircuit(total_qubits)
         meas_idx, _ = tree_bpqm(graph, qc_bpqm, root=root, offset=n_ancilla)
+
         qc_decode.compose(qc_bpqm, inplace=True)
         qc_decode.barrier()
 
@@ -449,7 +451,7 @@ def decode_single_syndrome(
         qubits=list(range(n_ancilla, n_ancilla + n_data)),
         inplace=True
     )
-
+    
     if not run_simulation:
         return None, None, qc_decode
 
@@ -462,6 +464,7 @@ def decode_single_syndrome(
         full_qc.measure(qb, i)
 
     # Execute on simulator
+
     backend = AerSimulator()
     compiled = transpile(full_qc, backend)
     job = backend.run(compiled, shots=shots)

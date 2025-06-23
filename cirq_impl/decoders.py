@@ -5,7 +5,7 @@ Cirq version of BPQM decoders.
 # TODO: Implement Cirq-based BPQM decoders here
 
 import cirq
-
+from collections import Counter
 # Example stub function
 def cirq_decode(*args, **kwargs):
     raise NotImplementedError("Cirq BPQM decoder not yet implemented.")
@@ -129,7 +129,7 @@ def decode_single_syndrome(
         for b in order
     ]
 
-    # Determine qubit counts
+    # Determine qubit counts - match Qiskit logic exactly
     n_ancilla = code.H.shape[0]
     max_data = max(sum(occ.values()) for _, occ, _ in computation_graphs)
     n_data = max(max_data, code.n)
@@ -141,49 +141,56 @@ def decode_single_syndrome(
     data_qubits = all_qubits[n_ancilla:n_ancilla + n_data]
     output_qubits = all_qubits[n_ancilla + n_data:]
 
-    # Initialize decode circuit and data preparation
+    # Initialize decode circuit
     qc_decode = cirq.Circuit()
+    # Ensure all qubits appear by adding identity gates
+    qc_decode.append(cirq.I(q) for q in all_qubits)
     
-    # Create a temporary code for data initialization
+    # Create a temporary code for initialization - match Qiskit approach
     temp_code = CirqLinearCode(None, np.zeros((0, n_data), int))
     temp_code.n = n_data
     
-    # If prior is None, use all-zero codeword
+    # If prior is None, use all-zero codeword like Qiskit
     if prior is None:
         codeword = np.zeros(n_data, dtype=int)
     else:
         codeword = None
     
-    data_init, _ = create_init_qc(
+    # Create data initialization circuit using the helper function
+    data_init, data_init_qubits = create_init_qc(
         code=temp_code,
         theta=theta,
         codeword=codeword,
         prior=prior
     )
     
-    # Apply data initialization to the correct qubits
+    # Apply data initialization to decode circuit with proper qubit mapping
+    # Map the initialization qubits to our data qubits
+    data_init_circuit = cirq.Circuit()
+    # for q in range(total_qubits):
+    #     data_init_circuit.append(cirq.I(cirq.LineQubit(q)))
+    
+    qubit_map = {data_init_qubits[i]: data_qubits[i] for i in range(len(data_init_qubits))}
     for moment in data_init:
-        ops = []
+        mapped_ops = []
         for op in moment:
-            # Map the operation to the correct data qubits
-            qubit_idx = op.qubits[0].x + n_ancilla
-            new_op = op.gate.on(all_qubits[qubit_idx])
-            ops.append(new_op)
-        qc_decode.append(ops)
-
+            mapped_qubits = [qubit_map.get(q, q) for q in op.qubits]
+            mapped_ops.append(op.gate(*mapped_qubits))
+        data_init_circuit.append(cirq.Moment(mapped_ops))
+    qc_decode.append(data_init_circuit)
+    
     # Build and apply BPQM for each logical qubit
     for idx, (graph, occ, root) in enumerate(computation_graphs):
-        # Map output nodes to qubit indices
-        leaves = [n for n, d in graph.nodes(data=True) if d.get("type") == "output"]
-        qubit_map = {}
-        for j in range(code.n):
-            qubit_map[f"y{j}_0"] = all_qubits[n_ancilla + j]
         
+    
+        # Map output nodes to qubit indices - match Qiskit mapping exactly
+        leaves = [n for n, d in graph.nodes(data=True) if d.get("type") == "output"]
+        qubit_map = {f"y{j}_0": j for j in range(code.n)}
         next_idx = code.n
         for leaf in leaves:
             level = int(leaf.split("_")[1])
             if level > 0:
-                qubit_map[leaf] = all_qubits[n_ancilla + next_idx]
+                qubit_map[leaf] = next_idx
                 next_idx += 1
 
         # Annotate output angles and qubit indices
@@ -198,37 +205,44 @@ def decode_single_syndrome(
                      if d.get("type") == "check" and graph.out_degree(n) == 0]
         graph.remove_nodes_from(to_remove)
 
-        # Construct BPQM subcircuit
-        qc_bpqm, meas_idx = tree_bpqm_cirq(graph, all_qubits, root=root, offset=n_ancilla)
+        # Construct BPQM subcircuit - use all_qubits with offset like Qiskit
+        qc_bpqm = cirq.Circuit()
+        # qc_bpqm.append(cirq.I(q) for q in all_qubits)
+        meas_idx, _ = tree_bpqm_cirq(graph, qc_bpqm, root=root, offset=n_ancilla)
+        # print(qc_bpqm)
         qc_decode.append(qc_bpqm)
 
-        # Entangling measurement and uncompute
+        # Entangling measurement and uncompute - match Qiskit exactly
         meas_qubit = all_qubits[meas_idx]
         target_qubit = output_qubits[idx]
         
         qc_decode.append(cirq.H(meas_qubit))
-        # Only add CNOT if qubits are different
-        if meas_qubit != target_qubit:
-            qc_decode.append(cirq.CNOT(meas_qubit, target_qubit))
+        qc_decode.append(cirq.CNOT(meas_qubit, target_qubit))
         qc_decode.append(cirq.H(meas_qubit))
         
         # Uncompute BPQM
         qc_decode.append(cirq.inverse(qc_bpqm))
 
     # Uncompute data initialization
-    qc_decode.append(cirq.inverse(data_init))
+    qc_decode.append(cirq.inverse(data_init_circuit))
 
+    # Return circuit BEFORE simulation to preserve UCRY blocks
     if not run_simulation:
         return None, None, qc_decode
 
+    # Create a copy of the circuit for simulation (this will decompose UCRY)
+    sim_circuit = qc_decode.copy()
+    
     # Prepare full circuit with syndrome prep and measurement
     full_circuit = cirq.Circuit()
+    # Ensure all qubits appear by adding identity gates
+    # full_circuit.append(cirq.I(q) for q in all_qubits)
     
     # Add syndrome preparation to ancilla qubits
     full_circuit.append(syndrome_qc)
     
-    # Add decoding circuit
-    full_circuit.append(qc_decode)
+    # Add decoding circuit (this will decompose UCRY blocks)
+    full_circuit.append(sim_circuit)
     
     # Add measurements
     for i, qb in enumerate(output_qubits):
@@ -237,13 +251,17 @@ def decode_single_syndrome(
     # Execute on simulator
     simulator = cirq.Simulator()
     result = simulator.run(full_circuit, repetitions=shots)
-    
-    # Process results
+
+    # Process results - match Qiskit bit reversal
+    combined = np.hstack([result.measurements[f'm{i}'] for i in range(len(order))])
+
+    # Convert to bitstrings (Qiskit-style: qubit0 is leftmost)
+    bitstrings = [''.join(str(bit) for bit in row) for row in combined]
+
+    # Get counts
     counts: Dict[str, int] = {}
-    for i in range(shots):
-        bits = ''.join(str(result.measurements[f'm{j}'][i, 0]) for j in range(len(order)))
-        counts[bits] = counts.get(bits, 0) + 1
-    
+    counts = dict(Counter(bitstrings))
+
     sorted_counts = dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
     if debug:
